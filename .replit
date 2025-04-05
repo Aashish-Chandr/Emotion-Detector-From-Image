@@ -23,6 +23,10 @@ args = "install_dependencies"
 task = "workflow.run"
 args = "Emotion Detection App"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "install_numpy"
+
 [[workflows.workflow]]
 name = "install_dependencies"
 author = "agent"
@@ -51,6 +55,20 @@ task = "packager.installForAll"
 task = "shell.exec"
 args = "python app.py"
 waitForPort = 5000
+
+[[workflows.workflow]]
+name = "install_numpy"
+author = "agent"
+
+[workflows.workflow.metadata]
+agentRequireRestartOnSave = false
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install numpy==1.24.3"
 
 [[ports]]
 localPort = 5000

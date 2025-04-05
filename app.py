@@ -7,7 +7,10 @@ import requests
 import json
 import datetime
 import uuid
+import tempfile
+from deepface import DeepFace
 from database import add_emotion_record, get_all_emotion_records, get_emotion_record, delete_emotion_record
+from utils import convert_to_opencv_format, get_emotion_emoji
 
 # Load Haar cascades for face detection
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -66,24 +69,12 @@ def analyze_emotion(face_img, has_smile, has_eyes, face_ratio, face_size_ratio):
     
     return dominant_emotion, confidence
 
-# Function to get emotion emoji
-def get_emotion_emoji(emotion):
-    """Return appropriate emoji for each emotion"""
-    emojis = {
-        'happy': '😊',
-        'sad': '😢',
-        'angry': '😠',
-        'fear': '😨',
-        'surprise': '😲',
-        'disgust': '🤢',
-        'neutral': '😐'
-    }
-    return emojis.get(emotion.lower(), '❓')
+# Using get_emotion_emoji from utils.py
 
 # Function to analyze faces in image
 def analyze_image(image, selected_emotion=None, save_to_db=True):
     """
-    Analyze faces in the input image and detect emotions.
+    Analyze faces in the input image and detect emotions using DeepFace.
     If selected_emotion is provided, override the detection for a specific face.
     """
     if image is None:
@@ -109,19 +100,53 @@ def analyze_image(image, selected_emotion=None, save_to_db=True):
             img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         
-        # Equalize histogram for better contrast
-        gray = cv2.equalizeHist(gray)
+        # Create a temporary file to save the image for DeepFace
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+            temp_path = temp_file.name
+            cv2.imwrite(temp_path, img_bgr)
         
-        # Detect faces using Haar cascade
-        faces = face_cascade.detectMultiScale(
-            gray, 
-            scaleFactor=1.1, 
-            minNeighbors=5, 
-            minSize=(30, 30)
-        )
+        # Detect faces using DeepFace
+        try:
+            # First attempt with DeepFace
+            analysis = DeepFace.analyze(img_path=temp_path, 
+                                       actions=['emotion'],
+                                       enforce_detection=False,
+                                       detector_backend='opencv')
+            
+            if not analysis:  # If no faces detected by DeepFace
+                raise Exception("No faces detected by DeepFace")
+                
+            # DeepFace may return a single dict or a list of dicts
+            if isinstance(analysis, dict):
+                analysis = [analysis]
+                
+        except Exception as df_error:
+            # Fallback to traditional Haar cascade
+            faces = face_cascade.detectMultiScale(
+                gray, 
+                scaleFactor=1.1, 
+                minNeighbors=5, 
+                minSize=(30, 30)
+            )
+            
+            if len(faces) == 0:
+                return image, f"No faces detected in the image. DeepFace error: {str(df_error)}"
+                
+            # Create placeholder for manual detection
+            analysis = []
+            for face_coords in faces:
+                analysis.append({
+                    "region": {"x": int(face_coords[0]), "y": int(face_coords[1]), 
+                              "w": int(face_coords[2]), "h": int(face_coords[3])},
+                    "emotion": {"neutral": 1.0},
+                    "dominant_emotion": "neutral"
+                })
         
-        if len(faces) == 0:
-            return image, "No faces detected in the image."
+        # Clean up temp file
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
         
         # Create a copy of image for drawing
         result_img = img_bgr.copy()
@@ -132,12 +157,23 @@ def analyze_image(image, selected_emotion=None, save_to_db=True):
         
         # Process each detected face
         output_text = []
-        for i, (x, y, w, h) in enumerate(faces):
+        for i, face_data in enumerate(analysis):
             face_id = i + 1
             
+            # Get face coordinates
+            if "region" in face_data:
+                # From DeepFace
+                x = face_data["region"]["x"]
+                y = face_data["region"]["y"]
+                w = face_data["region"]["w"]
+                h = face_data["region"]["h"]
+            else:
+                # Fallback
+                continue
+            
             # Extract face region
-            face_gray = gray[y:y+h, x:x+w]
             face_color = result_img[y:y+h, x:x+w]
+            face_gray = cv2.cvtColor(face_color, cv2.COLOR_BGR2GRAY) if len(face_color.shape) == 3 else face_color
             
             # Draw rectangle around face
             cv2.rectangle(result_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -146,7 +182,7 @@ def analyze_image(image, selected_emotion=None, save_to_db=True):
             cv2.putText(result_img, f"#{face_id}", (x, y-10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            # Detect facial features
+            # Detect facial features (for visualization)
             eyes = eye_cascade.detectMultiScale(face_gray, 1.1, 5)
             smile = smile_cascade.detectMultiScale(face_gray, 1.8, 20, minSize=(25, 25))
             
@@ -158,21 +194,21 @@ def analyze_image(image, selected_emotion=None, save_to_db=True):
             for (sx, sy, sw, sh) in smile:
                 cv2.rectangle(face_color, (sx, sy), (sx+sw, sy+sh), (0, 0, 255), 2)
             
-            # Calculate metrics for emotion detection
-            has_eyes = len(eyes) > 0
-            has_smile = len(smile) > 0
-            face_ratio = w / h  # width to height ratio
-            face_size_ratio = (w * h) / (image.shape[0] * image.shape[1])
-            
             # Check if there's a manually selected emotion for this face
             if selected_emotion and selected_emotion.startswith(f"face_{face_id}_"):
                 emotion = selected_emotion.split('_')[2]
                 confidence = 1.0  # User-selected emotions have 100% confidence
             else:
-                # Analyze emotion based on detected features
-                emotion, confidence = analyze_emotion(
-                    face_gray, has_smile, has_eyes, face_ratio, face_size_ratio
-                )
+                # Use DeepFace emotion result
+                if "dominant_emotion" in face_data and "emotion" in face_data:
+                    emotion = face_data["dominant_emotion"]
+                    confidence = face_data["emotion"].get(emotion, 0.5) / 100.0
+                    if confidence <= 0 or confidence > 1:
+                        confidence = 0.5  # Normalize if out of range
+                else:
+                    # Fallback
+                    emotion = "neutral"
+                    confidence = 0.5
             
             # Store for database
             face_emotions[str(face_id)] = emotion
@@ -200,7 +236,7 @@ def analyze_image(image, selected_emotion=None, save_to_db=True):
             # Save record to database
             add_emotion_record(
                 image_name=image_name,
-                face_count=len(faces),
+                face_count=len(analysis),
                 emotions_detected=json.dumps(face_emotions),
                 confidence_levels=json.dumps(face_confidences)
             )
@@ -226,7 +262,8 @@ def correct_emotion(face_num, emotion, last_image):
 with gr.Blocks(title="Interactive Emotion Detection") as demo:
     gr.Markdown("# 😊 Interactive Emotion Detector")
     gr.Markdown("""
-    Upload an image containing faces, and this app will detect emotions using computer vision techniques.
+    Upload an image containing faces, and this app will detect emotions using DeepFace, a powerful facial analysis library.
+    The system uses pre-trained deep learning models for accurate emotion classification.
     If the automatic detection is incorrect, you can manually select the correct emotion for each face.
     """)
     
