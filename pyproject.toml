@@ -7,7 +7,9 @@ dependencies = [
     "deepface>=0.0.93",
     "gradio>=5.23.3",
     "numpy>=2.2.4",
+    "openai>=1.70.0",
     "opencv-python>=4.11.0.86",
     "pillow>=11.1.0",
+    "requests>=2.32.3",
     "streamlit>=1.44.1",
 ]
