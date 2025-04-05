@@ -4,6 +4,10 @@ import numpy as np
 from PIL import Image
 import os
 import requests
+import json
+import datetime
+import uuid
+from database import add_emotion_record, get_all_emotion_records, get_emotion_record, delete_emotion_record
 
 # Load Haar cascades for face detection
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -77,7 +81,7 @@ def get_emotion_emoji(emotion):
     return emojis.get(emotion.lower(), '❓')
 
 # Function to analyze faces in image
-def analyze_image(image, selected_emotion=None):
+def analyze_image(image, selected_emotion=None, save_to_db=True):
     """
     Analyze faces in the input image and detect emotions.
     If selected_emotion is provided, override the detection for a specific face.
@@ -121,6 +125,10 @@ def analyze_image(image, selected_emotion=None):
         
         # Create a copy of image for drawing
         result_img = img_bgr.copy()
+        
+        # Track emotions and confidence for database
+        face_emotions = {}
+        face_confidences = {}
         
         # Process each detected face
         output_text = []
@@ -166,6 +174,10 @@ def analyze_image(image, selected_emotion=None):
                     face_gray, has_smile, has_eyes, face_ratio, face_size_ratio
                 )
             
+            # Store for database
+            face_emotions[str(face_id)] = emotion
+            face_confidences[str(face_id)] = confidence
+            
             # Get emoji and format confidence
             emoji = get_emotion_emoji(emotion)
             confidence_pct = f"{int(confidence * 100)}%"
@@ -179,6 +191,19 @@ def analyze_image(image, selected_emotion=None):
         
         # Convert back to RGB for display
         result_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
+        
+        # Save to database if requested
+        if save_to_db:
+            # Generate a unique image name
+            image_name = f"analysis_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            
+            # Save record to database
+            add_emotion_record(
+                image_name=image_name,
+                face_count=len(faces),
+                emotions_detected=json.dumps(face_emotions),
+                confidence_levels=json.dumps(face_confidences)
+            )
         
         return result_rgb, "\n".join(output_text)
         
@@ -254,6 +279,110 @@ with gr.Blocks(title="Interactive Emotion Detection") as demo:
         outputs=[output_image, output_text]
     )
 
+# Function to display detection history
+def show_detection_history():
+    """Retrieve and display past emotion detection history from database"""
+    try:
+        # Get all records from database
+        records = get_all_emotion_records()
+        
+        if not records:
+            return "No detection history found in the database."
+        
+        # Format records for display
+        history_text = []
+        for record in records:
+            # Parse JSON strings from database
+            emotions = json.loads(record.emotions_detected)
+            confidences = json.loads(record.confidence_levels)
+            
+            # Format timestamp
+            timestamp = record.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Start entry with header
+            entry = f"ID: {record.id} | Time: {timestamp} | Faces: {record.face_count}\n"
+            
+            # Add details for each face
+            for face_id, emotion in emotions.items():
+                confidence = confidences.get(face_id, 0) * 100
+                emoji = get_emotion_emoji(emotion)
+                entry += f"  - Face #{face_id}: {emotion.capitalize()} {emoji} ({confidence:.1f}%)\n"
+            
+            # Add notes if available
+            if record.notes:
+                entry += f"  Notes: {record.notes}\n"
+                
+            entry += "----------------------------------------\n"
+            history_text.append(entry)
+        
+        return "\n".join(history_text)
+    
+    except Exception as e:
+        return f"Error retrieving detection history: {str(e)}"
+
+# Function to delete a record
+def delete_record(record_id):
+    """Delete a specific record from the database"""
+    try:
+        # Convert to integer
+        record_id = int(record_id)
+        
+        # Delete the record
+        success = delete_emotion_record(record_id)
+        
+        if success:
+            return f"Record #{record_id} successfully deleted.", show_detection_history()
+        else:
+            return f"Record #{record_id} not found.", show_detection_history()
+    
+    except Exception as e:
+        return f"Error deleting record: {str(e)}", show_detection_history()
+
 # Launch the app
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=5000)
+    with gr.Blocks(title="Emotion Detection System") as app:
+        gr.Markdown("# 😊 Emotion Detection System")
+        
+        # Create tabs for different features
+        with gr.Tabs():
+            # Main detection tab
+            with gr.TabItem("Emotion Detection"):
+                demo.render()
+            
+            # History tab
+            with gr.TabItem("Detection History"):
+                gr.Markdown("## 📋 Emotion Detection History")
+                gr.Markdown("View and manage your past emotion detection records.")
+                
+                # Display history
+                history_text = gr.Textbox(show_label=False, lines=20)
+                
+                with gr.Row():
+                    refresh_btn = gr.Button("Refresh History")
+                    
+                    with gr.Column():
+                        delete_id = gr.Number(label="Record ID to Delete", precision=0)
+                        delete_btn = gr.Button("Delete Record")
+                
+                # Set up event handlers for history tab
+                refresh_btn.click(
+                    fn=show_detection_history,
+                    inputs=None,
+                    outputs=history_text
+                )
+                
+                delete_btn.click(
+                    fn=delete_record,
+                    inputs=delete_id,
+                    outputs=[gr.Textbox(visible=False), history_text]
+                )
+                
+                # Load history on tab open
+                app.load(
+                    fn=show_detection_history,
+                    inputs=None,
+                    outputs=history_text
+                )
+    
+    # Launch the combined app
+    app.launch(server_name="0.0.0.0", server_port=5000)
