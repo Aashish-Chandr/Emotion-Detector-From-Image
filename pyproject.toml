@@ -1,0 +1,13 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "deepface>=0.0.93",
+    "gradio>=5.23.3",
+    "numpy>=2.2.4",
+    "opencv-python>=4.11.0.86",
+    "pillow>=11.1.0",
+    "streamlit>=1.44.1",
+]
